@@ -1,0 +1,71 @@
+name: Usage Stats
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: usage-stats
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update usage stats
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const historyPath = 'usage-history.json';
+            const statsPath = 'stats.json';
+            const windowDays = 30;
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: 'counter'
+            });
+            const asset = release.data.assets.find(a => a.name === 'pcl2-usage-counter.txt');
+            const total = asset ? asset.download_count : 0;
+            let history = [];
+            if (fs.existsSync(historyPath)) {
+              history = JSON.parse(fs.readFileSync(historyPath, 'utf8'));
+            }
+            const now = new Date();
+            history.push({ time: now.toISOString(), count: total });
+            const keepMs = 40 * 24 * 60 * 60 * 1000;
+            history = history.filter(h => new Date(h.time).getTime() >= now.getTime() - keepMs);
+            history.sort((a, b) => new Date(a.time) - new Date(b.time));
+            const cutoff = now.getTime() - windowDays * 24 * 60 * 60 * 1000;
+            let base = 0;
+            for (const h of history) {
+              if (new Date(h.time).getTime() <= cutoff) base = h.count;
+              else break;
+            }
+            const active = Math.max(0, total - base);
+            fs.writeFileSync(historyPath, JSON.stringify(history, null, 2) + '\n');
+            fs.writeFileSync(statsPath, JSON.stringify({
+              active,
+              total,
+              windowDays,
+              updated: now.toISOString()
+            }, null, 2) + '\n');
+            console.log(`total=${total} base=${base} active=${active}`);
+
+      - name: Commit stats
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stats.json usage-history.json
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git commit -m "Update usage stats [skip ci]"
+          git push
